@@ -344,7 +344,14 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     def sanitize_relationship_name(self, relationship_name: str) -> str:
         """
-        Sanitize relationship name to be valid for Cypher queries.
+        Sanitize relationship name to be a valid Cypher identifier.
+
+        FalkorDB's Cypher parser only accepts identifiers matching
+        ``[A-Za-z_][A-Za-z0-9_]*`` for unquoted relationship types, so
+        non-ASCII letters (á, ç, ñ, …) must be folded to ASCII before
+        substitution. Without this, names extracted from non-English text
+        such as ``responsável_por`` produce queries the parser rejects with
+        ``Invalid input ...: expected '|', '*', '{', a parameter or ']'``.
 
         Parameters:
         -----------
@@ -354,10 +361,17 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         --------
             - str: A sanitized relationship name valid for Cypher
         """
-        # Replace hyphens, spaces, and other special characters with underscores
         import re
+        import unicodedata
 
-        sanitized = re.sub(r"[^\w]", "_", relationship_name)
+        # Decompose accented chars into base + combining marks, then drop
+        # the combining marks: á → a, ç → c, ã → a, ñ → n.
+        normalized = unicodedata.normalize("NFKD", relationship_name)
+        ascii_only = "".join(c for c in normalized if not unicodedata.combining(c))
+
+        # ``re.ASCII`` forces \w to mean [a-zA-Z0-9_], so any remaining
+        # non-ASCII characters (CJK, Cyrillic, …) collapse to underscores.
+        sanitized = re.sub(r"[^\w]", "_", ascii_only, flags=re.ASCII)
         # Remove consecutive underscores
         sanitized = re.sub(r"_+", "_", sanitized)
         # Remove leading/trailing underscores
