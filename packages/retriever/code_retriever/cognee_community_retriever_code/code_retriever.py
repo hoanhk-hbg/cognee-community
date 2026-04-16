@@ -107,12 +107,11 @@ class CodeRetriever(BaseRetriever):
                     similar_filenames.append(
                         {"id": res.id, "score": res.score, "payload": res.payload}
                     )
-
             existing_collection = []
             for collection in self.classes_and_functions_collections:
                 if await vector_engine.has_collection(collection):
                     existing_collection.append(collection)
-
+            print(f"Existing collections for code pieces: {existing_collection}")
             if not existing_collection:
                 raise RuntimeError("No collection found for code retriever")
 
@@ -145,8 +144,12 @@ class CodeRetriever(BaseRetriever):
                         similar_filenames.append(
                             {"id": res.id, "score": res.score, "payload": res.payload}
                         )
-
+                        
+            existing_collection = []
             for collection in self.classes_and_functions_collections:
+                if await vector_engine.has_collection(collection):
+                    existing_collection.append(collection)
+            for collection in existing_collection:
                 logger.debug(f"Searching {collection} with extracted source code")
                 search_results_code = await vector_engine.search(
                     collection, files_and_codeparts.sourcecode, limit=self.top_k
@@ -188,14 +191,17 @@ class CodeRetriever(BaseRetriever):
 
         return "\n".join(
             ", ".join(
-                triplet[0]["name"]
+                str(triplet[0].get("name", triplet[0].get("id", "UnknownNode")))
                 + " --> "
-                + triplet[1]["relationship_name"]
+                + str(triplet[1].get("relationship_name", "UNKNOWN_REL"))
                 + " --> "
-                + triplet[2]["name"]
+                + str(triplet[2].get("name", triplet[2].get("id", "UnknownNode")))
                 for triplet in triplet_list
+                if isinstance(triplet, tuple) and len(triplet) >= 3 
+                and isinstance(triplet[0], dict) and isinstance(triplet[2], dict)
             )
             for triplet_list in triplets
+            if triplet_list
         )
 
     async def get_completion_from_context(

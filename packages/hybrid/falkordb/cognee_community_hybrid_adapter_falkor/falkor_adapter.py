@@ -108,25 +108,20 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     @staticmethod
     def _sanitize_cypher_params(params: dict) -> dict:
-        """Recursively convert Enum values to their underlying value.
-
-        FalkorDB serializes unknown types via ``str()``, which turns
-        ``MyEnum.member`` into ``"MyEnum.member"`` – an invalid Cypher
-        literal.  This helper ensures every Enum is replaced by its
-        ``.value`` before the params reach the driver.
-        """
+        """Recursively convert Enum and UUID values to their underlying value."""
         sanitized = {}
         for key, value in params.items():
             if isinstance(value, dict):
                 sanitized[key] = FalkorDBAdapter._sanitize_cypher_params(value)
             elif isinstance(value, Enum):
                 sanitized[key] = value.value
+            elif isinstance(value, UUID):
+                sanitized[key] = str(value)
             elif isinstance(value, list):
                 sanitized[key] = [
-                    item.value
-                    if isinstance(item, Enum)
-                    else FalkorDBAdapter._sanitize_cypher_params(item)
-                    if isinstance(item, dict)
+                    item.value if isinstance(item, Enum)
+                    else str(item) if isinstance(item, UUID)
+                    else FalkorDBAdapter._sanitize_cypher_params(item) if isinstance(item, dict)
                     else item
                     for item in value
                 ]
@@ -414,21 +409,32 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     async def has_collection(self, collection_name: str) -> bool:
         """
-        Check if a collection with the specified name exists in the graph database.
+        Check if a collection (vector index) with the specified name exists in the graph database.
 
         Parameters:
         -----------
 
-            - collection_name (str): The name of the collection to check for existence.
+            - collection_name (str): The name of the collection (e.g., "CodeFile_name" or "ClassDefinition_source_code").
 
         Returns:
         --------
 
-            - bool: Returns true if the collection exists, otherwise false.
+            - bool: Returns true if the vector index exists, otherwise false.
         """
-        collections = self.driver.list_graphs()
+        try:
+            if "_" in collection_name:
+                label, _, attribute_name = collection_name.partition("_")
+            else:
+                label = ""
+                attribute_name = collection_name
 
-        return collection_name in collections
+            graph = self.driver.select_graph(self.graph_name)
+
+            return self.has_vector_index(graph, label, f"{attribute_name}_vector")
+
+        except Exception as e:
+            print(f"Error checking collection {collection_name}: {e}")
+            return False
 
     async def create_data_points(self, collection_name: str, data_points: list[DataPoint]):
         """
@@ -861,16 +867,6 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
     async def get_connections(self, node_id: UUID) -> list:
         """
         Retrieve connection details (predecessors and successors) for a given node ID.
-
-        Parameters:
-        -----------
-
-            - node_id (UUID): The UUID of the node whose connections are to be retrieved.
-
-        Returns:
-        --------
-
-            - list: Returns a list of tuples representing the connections of the node.
         """
         predecessors_query = """
         MATCH (node)<-[relation]-(neighbour)
@@ -883,8 +879,8 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         RETURN node, relation, neighbour
         """
 
-        predecessors = await self.query(predecessors_query, dict(node_id=node_id))
-        successors = await self.query(successors_query, dict(node_id=node_id))
+        predecessors = await self.query(predecessors_query, dict(node_id=str(node_id)))
+        successors = await self.query(successors_query, dict(node_id=str(node_id)))
 
         connections = []
 
