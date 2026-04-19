@@ -116,6 +116,7 @@ are contained in one package (i.e. all tasks used in one pipeline are packaged t
 | `cognee-community-retriever-code`      | Retriever  | Custom CODE retriever package                                         |
 | `cognee-community-tasks-codify`        | Task       | Custom codify tasks package                                           |
 | `cognee-community-tasks-scrapegraph`   | Task       | Web scraping tasks powered by [ScrapeGraphAI](https://github.com/ScrapeGraphAI/scrapegraph-py) |
+| `cognee-community-tasks-exa`           | Task       | Web search tasks powered by [Exa](https://exa.ai)                     |
 
 ## Repository Structure
 
