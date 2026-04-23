@@ -24,6 +24,7 @@ from cognee.infrastructure.databases.vector.vector_db_interface import (
 )
 from cognee.infrastructure.engine import DataPoint
 from cognee.infrastructure.engine.utils import parse_id
+from cognee.infrastructure.databases.vector.embeddings.config import get_embedding_config
 
 from falkordb.falkordb import FalkorDB
 from falkordb.graph import Graph, QueryResult
@@ -205,7 +206,15 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         if not non_blank:
             return [[] for _ in data]
 
-        result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
+        # result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
+
+        batch_size = get_embedding_config().embedding_batch_size
+        results = []
+        for i in range(0, len(non_blank), batch_size):
+            batch = non_blank[i:i + batch_size]
+            batch_result = await self.embedding_engine.embed_text(batch)
+            results.extend(batch_result)
+        result = results
 
         # Fast path: no blanks were filtered
         if len(non_blank) == len(data):
