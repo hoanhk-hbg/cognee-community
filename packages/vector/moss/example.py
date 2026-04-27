@@ -2,11 +2,10 @@ import asyncio
 import os
 import pathlib
 
+from cognee_community_vector_adapter_moss import register  # noqa: F401
 from dotenv import load_dotenv
 
 load_dotenv(pathlib.Path(__file__).parent / ".env")
-
-from cognee_community_vector_adapter_moss import register  # noqa: F401
 
 
 async def main():

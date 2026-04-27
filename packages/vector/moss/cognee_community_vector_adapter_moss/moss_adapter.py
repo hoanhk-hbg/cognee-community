@@ -13,7 +13,6 @@ from cognee.shared.logging_utils import get_logger
 from moss import (
     DocumentInfo,
     GetDocumentsOptions,
-    JobStatus,
     MossClient,
     MutationOptions,
     QueryOptions,
@@ -149,11 +148,13 @@ class MossAdapter(VectorDBInterface):
         docs = []
         for i, data_point in enumerate(data_points):
             raw = data_point.model_dump()
-            payload = _stringify_metadata({
-                **raw,
-                "_collection": collection_name,
-                "database_name": self.database_name,
-            })
+            payload = _stringify_metadata(
+                {
+                    **raw,
+                    "_collection": collection_name,
+                    "database_name": self.database_name,
+                }
+            )
             docs.append(
                 DocumentInfo(
                     id=str(data_point.id),
@@ -170,7 +171,12 @@ class MossAdapter(VectorDBInterface):
             if not self._index_ready:
                 await self._create_index_with_docs(docs)
             else:
-                logger.info("Adding %d docs to Moss index '%s' [%s]", len(docs), self._index_name, collection_name)
+                logger.info(
+                    "Adding %d docs to Moss index '%s' [%s]",
+                    len(docs),
+                    self._index_name,
+                    collection_name,
+                )
                 result = await self.client.add_docs(
                     self._index_name, docs, MutationOptions(upsert=True)
                 )
@@ -269,7 +275,9 @@ class MossAdapter(VectorDBInterface):
                     ScoredResult(
                         id=parse_id(doc.id),
                         payload=doc.metadata if include_payload else None,
-                        score=1 - doc.score if hasattr(doc, "score") and doc.score is not None else 0.0,
+                        score=1 - doc.score
+                        if hasattr(doc, "score") and doc.score is not None
+                        else 0.0,
                     )
                     for doc in result.docs
                 ]
@@ -280,7 +288,12 @@ class MossAdapter(VectorDBInterface):
                         scored, result.docs, node_name, node_name_filter_operator
                     )
                     scored = scored[: limit or 15]
-                    logger.info("Moss search '%s': %d results (%d before nodeset filter)", collection_name, len(scored), pre_filter)
+                    logger.info(
+                        "Moss search '%s': %d results (%d before nodeset filter)",
+                        collection_name,
+                        len(scored),
+                        pre_filter,
+                    )
                 else:
                     logger.info("Moss search '%s': %d results", collection_name, len(scored))
 
@@ -288,7 +301,12 @@ class MossAdapter(VectorDBInterface):
             except Exception as e:
                 last_err = e
                 if "503" in str(e) or "502" in str(e) or "429" in str(e):
-                    logger.warning("Moss search attempt %d/%d failed (retryable): %s", attempt + 1, RETRY_COUNT, str(e))
+                    logger.warning(
+                        "Moss search attempt %d/%d failed (retryable): %s",
+                        attempt + 1,
+                        RETRY_COUNT,
+                        str(e),
+                    )
                     await asyncio.sleep(RETRY_BACKOFF * (attempt + 1))
                     continue
                 logger.error("Error in Moss search: %s", str(e), exc_info=True)
@@ -312,7 +330,7 @@ class MossAdapter(VectorDBInterface):
     ) -> list[ScoredResult]:
         """Post-query filter on belongs_to_set (stored as JSON string in Moss metadata)."""
         filtered = []
-        for sr, doc in zip(scored, raw_docs):
+        for sr, doc in zip(scored, raw_docs, strict=False):
             raw = doc.metadata.get("belongs_to_set", "[]") if doc.metadata else "[]"
             try:
                 doc_sets = set(json.loads(raw))

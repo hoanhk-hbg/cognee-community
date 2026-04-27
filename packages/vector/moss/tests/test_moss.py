@@ -1,18 +1,16 @@
 import os
 import pathlib
 
-from dotenv import load_dotenv
-
-load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
-
 import cognee
 from cognee.infrastructure.databases.vector import get_vector_engine
 from cognee.modules.search.operations import get_history
 from cognee.modules.search.types import SearchType
 from cognee.modules.users.methods import get_default_user
 from cognee.shared.logging_utils import get_logger
-
 from cognee_community_vector_adapter_moss import register  # noqa: F401
+from dotenv import load_dotenv
+
+load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
 
 logger = get_logger()
 
@@ -143,7 +141,9 @@ async def main():
         node_name=["NLP", "Quantum"],
         node_name_filter_operator="AND",
     )
-    assert len(result) == 0, f"AND filter for non-overlapping nodesets should return empty, got {len(result)}"
+    assert len(result) == 0, (
+        f"AND filter for non-overlapping nodesets should return empty, got {len(result)}"
+    )
     print("PASSED: nodeset_filter_and")
 
     # Test: prune cleans up
