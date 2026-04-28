@@ -9,7 +9,6 @@ import re
 
 from cognee_community_hybrid_adapter_falkor.falkor_adapter import FalkorDBAdapter
 
-
 # Cypher's grammar for unquoted identifiers, which is what FalkorDB accepts
 # for relationship types in patterns like ``[edge:TYPE]``.
 _VALID_CYPHER_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -55,7 +54,7 @@ def test_non_latin_collapses_to_underscore():
     # Cyrillic / CJK have no ASCII fold, so they collapse to underscores
     # and we still get a valid (if opaque) identifier.
     assert _VALID_CYPHER_IDENT.match(_sanitize("знает"))  # "knows" in Russian
-    assert _VALID_CYPHER_IDENT.match(_sanitize("知道"))    # "knows" in Chinese
+    assert _VALID_CYPHER_IDENT.match(_sanitize("知道"))  # "knows" in Chinese
 
 
 def test_leading_digit_gets_underscore_prefix():
