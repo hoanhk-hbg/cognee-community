@@ -1659,8 +1659,8 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
         try:
             depth = int(depth)
-        except (TypeError, ValueError):
-            raise ValueError(f"depth must be an integer, got {depth!r}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"depth must be an integer, got {depth!r}") from exc
         depth = max(1, depth)
 
         # FalkorDB Cypher does not allow parameterising relationship types or path
@@ -1749,12 +1749,8 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
             relationship_properties: Dict[str, Any] = {
                 **edge_props,
                 "relationship_name": relationship_name,
-                "source_node_id": str(
-                    edge_props.get("source_node_id", start_node.get("id", ""))
-                ),
-                "target_node_id": str(
-                    edge_props.get("target_node_id", end_node.get("id", ""))
-                ),
+                "source_node_id": str(edge_props.get("source_node_id", start_node.get("id", ""))),
+                "target_node_id": str(edge_props.get("target_node_id", end_node.get("id", ""))),
             }
 
             triplets.append(
