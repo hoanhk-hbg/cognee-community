@@ -1,6 +1,7 @@
 from typing import Any, List, Optional
 from uuid import NAMESPACE_OID, UUID, uuid5
 
+from cognee.context_global_variables import set_database_global_context_variables
 from cognee.infrastructure.engine.models.DataPoint import DataPoint
 from cognee.infrastructure.llm import get_max_chunk_tokens
 from cognee.modules.cognify.config import get_cognify_config
@@ -95,6 +96,9 @@ async def run_code_graph_pipeline(
 
     # Save dataset to database
     dataset = await create_authorized_dataset(dataset_name, user)
+
+    # Set graph database context variable to use dataset_id as graph database name
+    await set_database_global_context_variables(dataset.id, user.id)
 
     if include_docs:
         non_code_pipeline_run = run_tasks(

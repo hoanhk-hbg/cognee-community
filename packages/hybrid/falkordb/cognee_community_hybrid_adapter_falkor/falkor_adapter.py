@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from enum import Enum
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
 from cognee.infrastructure.databases.exceptions import MissingQueryParameterError
@@ -24,6 +24,7 @@ from cognee.infrastructure.databases.vector.vector_db_interface import (
 )
 from cognee.infrastructure.engine import DataPoint
 from cognee.infrastructure.engine.utils import parse_id
+from cognee.infrastructure.databases.vector.embeddings.config import get_embedding_config
 
 from falkordb.falkordb import FalkorDB
 from falkordb.graph import Graph, QueryResult
@@ -108,25 +109,20 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     @staticmethod
     def _sanitize_cypher_params(params: dict) -> dict:
-        """Recursively convert Enum values to their underlying value.
-
-        FalkorDB serializes unknown types via ``str()``, which turns
-        ``MyEnum.member`` into ``"MyEnum.member"`` – an invalid Cypher
-        literal.  This helper ensures every Enum is replaced by its
-        ``.value`` before the params reach the driver.
-        """
+        """Recursively convert Enum and UUID values to their underlying value."""
         sanitized = {}
         for key, value in params.items():
             if isinstance(value, dict):
                 sanitized[key] = FalkorDBAdapter._sanitize_cypher_params(value)
             elif isinstance(value, Enum):
                 sanitized[key] = value.value
+            elif isinstance(value, UUID):
+                sanitized[key] = str(value)
             elif isinstance(value, list):
                 sanitized[key] = [
-                    item.value
-                    if isinstance(item, Enum)
-                    else FalkorDBAdapter._sanitize_cypher_params(item)
-                    if isinstance(item, dict)
+                    item.value if isinstance(item, Enum)
+                    else str(item) if isinstance(item, UUID)
+                    else FalkorDBAdapter._sanitize_cypher_params(item) if isinstance(item, dict)
                     else item
                     for item in value
                 ]
@@ -210,7 +206,15 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         if not non_blank:
             return [[] for _ in data]
 
-        result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
+        # result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
+
+        batch_size = get_embedding_config().embedding_batch_size
+        results = []
+        for i in range(0, len(non_blank), batch_size):
+            batch = non_blank[i:i + batch_size]
+            batch_result = await self.embedding_engine.embed_text(batch)
+            results.extend(batch_result)
+        result = results
 
         # Fast path: no blanks were filtered
         if len(non_blank) == len(data):
@@ -344,7 +348,14 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     def sanitize_relationship_name(self, relationship_name: str) -> str:
         """
-        Sanitize relationship name to be valid for Cypher queries.
+        Sanitize relationship name to be a valid Cypher identifier.
+
+        FalkorDB's Cypher parser only accepts identifiers matching
+        ``[A-Za-z_][A-Za-z0-9_]*`` for unquoted relationship types, so
+        non-ASCII letters (á, ç, ñ, …) must be folded to ASCII before
+        substitution. Without this, names extracted from non-English text
+        such as ``responsável_por`` produce queries the parser rejects with
+        ``Invalid input ...: expected '|', '*', '{', a parameter or ']'``.
 
         Parameters:
         -----------
@@ -354,10 +365,17 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         --------
             - str: A sanitized relationship name valid for Cypher
         """
-        # Replace hyphens, spaces, and other special characters with underscores
         import re
+        import unicodedata
 
-        sanitized = re.sub(r"[^\w]", "_", relationship_name)
+        # Decompose accented chars into base + combining marks, then drop
+        # the combining marks: á → a, ç → c, ã → a, ñ → n.
+        normalized = unicodedata.normalize("NFKD", relationship_name)
+        ascii_only = "".join(c for c in normalized if not unicodedata.combining(c))
+
+        # ``re.ASCII`` forces \w to mean [a-zA-Z0-9_], so any remaining
+        # non-ASCII characters (CJK, Cyrillic, …) collapse to underscores.
+        sanitized = re.sub(r"[^\w]", "_", ascii_only, flags=re.ASCII)
         # Remove consecutive underscores
         sanitized = re.sub(r"_+", "_", sanitized)
         # Remove leading/trailing underscores
@@ -414,21 +432,32 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
     async def has_collection(self, collection_name: str) -> bool:
         """
-        Check if a collection with the specified name exists in the graph database.
+        Check if a collection (vector index) with the specified name exists in the graph database.
 
         Parameters:
         -----------
 
-            - collection_name (str): The name of the collection to check for existence.
+            - collection_name (str): The name of the collection (e.g., "CodeFile_name" or "ClassDefinition_source_code").
 
         Returns:
         --------
 
-            - bool: Returns true if the collection exists, otherwise false.
+            - bool: Returns true if the vector index exists, otherwise false.
         """
-        collections = self.driver.list_graphs()
+        try:
+            if "_" in collection_name:
+                label, _, attribute_name = collection_name.partition("_")
+            else:
+                label = ""
+                attribute_name = collection_name
 
-        return collection_name in collections
+            graph = self.driver.select_graph(self.graph_name)
+
+            return self.has_vector_index(graph, label, f"{attribute_name}_vector")
+
+        except Exception as e:
+            print(f"Error checking collection {collection_name}: {e}")
+            return False
 
     async def create_data_points(self, collection_name: str, data_points: list[DataPoint]):
         """
@@ -538,18 +567,43 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         """
         pass
 
-    async def add_node(self, node_id: str, properties: Optional[Dict[str, Any]] = None) -> None:
+    async def add_node(
+        self,
+        node: Union[DataPoint, str],
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Add a single node with specified properties to the graph.
+
+        Supports both call styles required by ``GraphDBInterface`` in cognee 1.0.x:
+
+        - ``add_node(data_point)`` — when a ``DataPoint`` is passed, the data point is
+          embedded and inserted via the same path as ``create_data_points`` so any
+          configured vector indexes are populated.
+        - ``add_node(node_id, properties)`` — when a string id is provided, ``properties``
+          is required and must contain at minimum a ``type`` key. If
+          ``metadata.index_fields`` is supplied along with corresponding ``<field>_vector``
+          entries the vector columns are written as well.
 
         Parameters:
         -----------
 
-            - node_id (str): Unique identifier for the node being added.
-            - properties (Dict[str, Any]): A dictionary of properties associated with the node.
+            - node (Union[DataPoint, str]): A ``DataPoint`` or a string identifier.
+            - properties (Optional[Dict[str, Any]]): Required when ``node`` is a string.
         """
+        if isinstance(node, DataPoint):
+            await self.add_nodes([node])
+            return
+
+        if properties is None:
+            raise ValueError(
+                "FalkorDBAdapter.add_node: 'properties' is required when 'node' is a string id."
+            )
+
+        node_id = node
+
         # Clean the properties - remove None values and handle special types
-        clean_properties = {"id": node_id}
+        clean_properties: Dict[str, Any] = {"id": node_id}
         for key, value in properties.items():
             if value is not None:
                 if isinstance(value, UUID):
@@ -558,12 +612,20 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
                     clean_properties[key] = json.dumps(value)
                 else:
                     clean_properties[key] = value
+
+        node_label = properties.get("type") or "Node"
+        node_label = self.sanitize_relationship_name(str(node_label))
+
         query = dedent(f"""
-            MERGE (node:{properties["type"]} {{id: $node_id}})
+            MERGE (node:{node_label} {{id: $node_id}})
             SET node += $properties, node.updated_at = timestamp()
             """).strip()
-        for field in properties["metadata"]["index_fields"]:
-            query = query + f", node.{field}_vector = vecf32({properties[f'{field}_vector']})"
+
+        index_fields = (properties.get("metadata") or {}).get("index_fields", [])
+        for field in index_fields:
+            vector_key = f"{field}_vector"
+            if vector_key in properties and properties[vector_key] is not None:
+                query = query + f", node.{vector_key} = vecf32({properties[vector_key]})"
 
         params = {"node_id": node_id, "properties": clean_properties}
 
@@ -861,16 +923,6 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
     async def get_connections(self, node_id: UUID) -> list:
         """
         Retrieve connection details (predecessors and successors) for a given node ID.
-
-        Parameters:
-        -----------
-
-            - node_id (UUID): The UUID of the node whose connections are to be retrieved.
-
-        Returns:
-        --------
-
-            - list: Returns a list of tuples representing the connections of the node.
         """
         predecessors_query = """
         MATCH (node)<-[relation]-(neighbour)
@@ -883,8 +935,8 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         RETURN node, relation, neighbour
         """
 
-        predecessors = await self.query(predecessors_query, dict(node_id=node_id))
-        successors = await self.query(successors_query, dict(node_id=node_id))
+        predecessors = await self.query(predecessors_query, dict(node_id=str(node_id)))
+        successors = await self.query(successors_query, dict(node_id=str(node_id)))
 
         connections = []
 
@@ -1593,6 +1645,128 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
             edges.append((source_id, target_id, rel_type, properties))
 
         return nodes, edges
+
+    async def get_neighborhood(
+        self,
+        node_ids: List[str],
+        depth: int = 1,
+        edge_types: Optional[List[str]] = None,
+    ) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[Tuple[str, str, str, Dict[str, Any]]]]:
+        """
+        Get the k-hop neighborhood subgraph around a set of seed nodes.
+
+        Returns all nodes and edges within ``depth`` hops of any seed node, in the same
+        format as ``get_graph_data()``. When ``edge_types`` is provided traversal is
+        restricted to edges whose relationship type matches one of the supplied values.
+        """
+        if not node_ids:
+            return [], []
+
+        try:
+            depth = int(depth)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"depth must be an integer, got {depth!r}") from exc
+        depth = max(1, depth)
+
+        # FalkorDB Cypher does not allow parameterising relationship types or path
+        # lengths, so they are interpolated. ``depth`` is coerced to int and edge type
+        # names are run through the existing identifier sanitiser to keep the query safe.
+        rel_filter = ""
+        if edge_types:
+            sanitized = "|".join(self.sanitize_relationship_name(t) for t in edge_types)
+            rel_filter = f":{sanitized}"
+
+        path_query = (
+            f"MATCH (seed)-[r{rel_filter}*1..{int(depth)}]-(neighbor) "
+            "WHERE seed.id IN $node_ids "
+            "RETURN DISTINCT neighbor.id AS id"
+        )
+        neighbor_result = await self.query(path_query, {"node_ids": node_ids})
+        neighbor_ids = [record[0] for record in neighbor_result.result_set if record[0]]
+
+        all_ids = list({*node_ids, *neighbor_ids})
+
+        nodes_result = await self.query(
+            "MATCH (n) WHERE n.id IN $ids RETURN n",
+            {"ids": all_ids},
+        )
+        nodes: List[Tuple[str, Dict[str, Any]]] = []
+        for record in nodes_result.result_set:
+            props = record[0].properties or {}
+            node_id = str(props.get("id", ""))
+            if node_id:
+                nodes.append((node_id, props))
+
+        if not nodes:
+            return [], []
+
+        edges_result = await self.query(
+            """
+            MATCH (n)-[r]->(m)
+            WHERE n.id IN $ids AND m.id IN $ids
+            RETURN n.id AS source, m.id AS target, type(r) AS rel, properties(r) AS props
+            """,
+            {"ids": all_ids},
+        )
+        edges: List[Tuple[str, str, str, Dict[str, Any]]] = []
+        for record in edges_result.result_set:
+            source_id = str(record[0])
+            target_id = str(record[1])
+            rel_type = str(record[2])
+            props = record[3] if isinstance(record[3], dict) else {}
+            source_id = str(props.get("source_node_id", source_id))
+            target_id = str(props.get("target_node_id", target_id))
+            edges.append((source_id, target_id, rel_type, props))
+
+        return nodes, edges
+
+    async def get_triplets_batch(self, offset: int, limit: int) -> List[Dict[str, Any]]:
+        """
+        Retrieve a batch of (source, relationship, target) triplets from the graph.
+
+        Returns dicts shaped like the Postgres / Kuzu adapters so cognee 1.0 callers
+        (e.g. ``cognee.tasks.memify.get_triplet_datapoints``) can consume the result:
+
+        ``{"start_node": {...}, "relationship_properties": {...}, "end_node": {...}}``
+        """
+        if offset < 0:
+            raise ValueError(f"Offset must be non-negative, got {offset}")
+        if limit < 0:
+            raise ValueError(f"Limit must be non-negative, got {limit}")
+        if limit == 0:
+            return []
+
+        query = """
+        MATCH (n)-[r]->(m)
+        RETURN n AS source, type(r) AS rel_type, properties(r) AS edge_props, m AS target
+        ORDER BY n.id, m.id, type(r)
+        SKIP $offset LIMIT $limit
+        """
+        result = await self.query(query, {"offset": int(offset), "limit": int(limit)})
+
+        triplets: List[Dict[str, Any]] = []
+        for record in result.result_set:
+            start_node = dict(record[0].properties) if record[0] is not None else {}
+            end_node = dict(record[3].properties) if record[3] is not None else {}
+            edge_props = record[2] if isinstance(record[2], dict) else {}
+
+            relationship_name = edge_props.get("relationship_name", str(record[1]))
+            relationship_properties: Dict[str, Any] = {
+                **edge_props,
+                "relationship_name": relationship_name,
+                "source_node_id": str(edge_props.get("source_node_id", start_node.get("id", ""))),
+                "target_node_id": str(edge_props.get("target_node_id", end_node.get("id", ""))),
+            }
+
+            triplets.append(
+                {
+                    "start_node": start_node,
+                    "relationship_properties": relationship_properties,
+                    "end_node": end_node,
+                }
+            )
+
+        return triplets
 
     async def prune(self) -> None:
         """
