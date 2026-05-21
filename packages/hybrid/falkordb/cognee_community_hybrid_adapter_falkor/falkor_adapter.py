@@ -29,6 +29,9 @@ from cognee.infrastructure.databases.vector.embeddings.config import get_embeddi
 from falkordb.falkordb import FalkorDB
 from falkordb.graph import Graph, QueryResult
 
+from cognee.infrastructure.databases.graph.config import get_graph_config
+from cognee.infrastructure.databases.vector.config import get_vectordb_config
+
 
 class IndexSchema(DataPoint):
     """
@@ -97,11 +100,42 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         database_name: str | None = "cognee_graph",
         **kwargs,
     ):
+
+        graph_config = get_graph_config()
+        vector_config = get_vectordb_config()
+
+        # host/url
+        host = url or graph_database_url
+        if not host or host == "None":
+            host = graph_config.graph_database_url or "localhost"
+
+        # port
+        port = graph_config.graph_database_port or vector_config.vector_db_port or 6379
+
+        # Resolve username & password
+        username = (
+            graph_database_username
+            or graph_config.graph_database_username
+            or vector_config.vector_db_username
+            or None
+        )
+        password = (
+            graph_database_password
+            or graph_config.graph_database_password
+            or vector_config.vector_db_password
+            or None
+        )
+
+        if username == "":
+            username = None
+        if password == "":
+            password = None
+
         self.driver = FalkorDB(
-            host=url if url else graph_database_url,
-            port=graph_database_port if graph_database_port else 6379,
-            username=graph_database_username,
-            password=graph_database_password,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
         )
         self.embedding_engine = get_embedding_engine() if not embedding_engine else embedding_engine
         self.graph_name = database_name if database_name else "cognee_graph"
